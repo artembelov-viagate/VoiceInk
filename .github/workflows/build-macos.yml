@@ -1,64 +1,66 @@
-name: Build VoiceInk macOS app
+name: VoiceInk macOS Build
+
+# This workflow builds the VoiceInk application on macOS.
+# It checks out the repository, installs Node.js and Rust,
+# builds the Tauri project located in the `VoiceInk/` subdirectory, and
+# uploads the generated `.dmg` files.
 
 on:
-  workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - "*"
+  pull_request:
+    branches:
+      - "*"
 
 jobs:
-  build-macos:
+  build:
     runs-on: macos-14
-
-    permissions:
-      contents: write
-
+    defaults:
+      run:
+        working-directory: VoiceInk
     steps:
-      # 1. Check out your repository
+      # Check out the source code
       - uses: actions/checkout@v4
 
-      # 2. Set up Node.js
+      # Set up the requested Node.js version according to the VoiceInk/package.json file
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 'lts/*'
+          node-version-file: 'VoiceInk/package.json'
           cache: 'npm'
+          cache-dependency-path: 'VoiceInk/package-lock.json'
 
-      # 3. Set up Rust with both Apple Silicon and Intel targets
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Install the Rust toolchain and set it as the override for this job
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          profile: minimal
+          override: true
 
-      # 4. Cache Rust build artifacts
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: './VoiceInk/src-tauri -> ./VoiceInk/src-tauri/target'
+      # Install the additional macOS targets required for universal builds
+      - name: Add macOS targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-      # 5. Install Node.js dependencies
-      - name: Install dependencies
+      # Install JavaScript dependencies
+      - name: Install NPM dependencies
         run: npm ci
-        working-directory: VoiceInk
 
-      # 6. Install Tauri CLI
+      # Install the Tauri CLI using Cargo
       - name: Install Tauri CLI
-        run: cargo install --locked tauri-cli
-        working-directory: VoiceInk
+        run: cargo install tauri-cli
 
-      # 7. Build for x86_64 and aarch64
-      - name: Build VoiceInk for macOS
-        run: |
-          rustup target add x86_64-apple-darwin
-          npm exec tauri build -- --target x86_64-apple-darwin
-          npm exec tauri build -- --target aarch64-apple-darwin
-        working-directory: VoiceInk
+      # Build the application for both architectures. Tauri will pick up the added targets and
+      # produce binaries for them when the universal target is specified.
+      - name: Build VoiceInk (universal)
+        run: npm run tauri -- build -- --target universal-apple-darwin
 
-      # 8. Upload DMG artifacts
+      # Upload the generated DMG installer(s) as workflow artifacts
       - name: Upload DMG artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: voiceink-macos-dmg
-          path: |
-            VoiceInk/src-tauri/target/*-apple-darwin/release/bundle/dmg/*.dmg
-          if-no-files-found: error
+          name: voiceink-dmg
+          # Match all .dmg files under the VoiceInk/src-tauri/target/*/release/bundle/dmg directory.
+          # This catches per-arch (aarch64, x86_64) builds as well as universal builds.
+          path: VoiceInk/src-tauri/target/*/release/bundle/dmg/*.dmg
