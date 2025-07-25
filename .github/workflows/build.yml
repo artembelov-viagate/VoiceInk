@@ -1,52 +1,65 @@
-name: Build VoiceInk with Xcode 15.4
+name: Build VoiceInk with Xcode 15.4 (macOS 15)
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-15  # Sequoia: includes Xcode 15.4 and Xcode 16
+    runs-on: macos-15  # ✅ macOS Sequoia runner with Xcode 15.4+ available
 
     steps:
-      - name: Set up Xcode 15.4
+      - name: Select Xcode 15.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '15.4'
 
-      - name: Check active Xcode
+      - name: Confirm Xcode version (debug)
         run: xcodebuild -version
 
-      - name: Checkout code
+      - name: Checkout VoiceInk
         uses: actions/checkout@v4
 
-      - name: Build whisper.xcframework
+      - name: Fetch whisper.cpp and build XCFramework
         run: |
           cd ..
           git clone https://github.com/ggerganov/whisper.cpp
           cd whisper.cpp
           ./build-xcframework.sh
 
-      - name: Resolve Swift packages
-        run: xcodebuild -project VoiceInk.xcodeproj -resolvePackageDependencies
-
-      - name: Build VoiceInk
-        run: xcodebuild -project VoiceInk.xcodeproj \
-                        -scheme VoiceInk \
-                        -configuration Release \
-                        CODE_SIGNING_REQUIRED=NO \
-                        CODE_SIGNING_ALLOWED=NO \
-                        CODE_SIGN_IDENTITY="" clean build
-
-      - name: Package DMG
+      - name: Resolve Swift Package dependencies
         run: |
-          mkdir dmg-out
-          APP=$(find ~/Library/Developer/Xcode/DerivedData -name VoiceInk.app | head -n1)
-          cp -R "$APP" dmg-out/
-          hdiutil create -volname VoiceInk -srcfolder dmg-out -ov -format UDZO VoiceInk.dmg
+          xcodebuild \
+            -project VoiceInk.xcodeproj \
+            -resolvePackageDependencies \
+            -disableAutomaticPackageResolution
 
-      - name: Upload artifact
+      - name: Build VoiceInk app
+        run: |
+          xcodebuild \
+            -project VoiceInk.xcodeproj \
+            -scheme VoiceInk \
+            -configuration Release \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build
+
+      - name: Package into DMG
+        run: |
+          mkdir -p dmg-out
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "VoiceInk.app" -type d | head -n 1)
+          cp -R "$APP_PATH" dmg-out/
+          hdiutil create -volname VoiceInk \
+                         -srcfolder dmg-out \
+                         -ov \
+                         -format UDZO \
+                         VoiceInk.dmg
+
+      - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: VoiceInk-macOS
