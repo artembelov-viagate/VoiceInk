@@ -1,44 +1,71 @@
-name: Build VoiceInk (Tauri) & Package DMG
+name: Build VoiceInk macOS app
 
 on:
-  push:
   workflow_dispatch:
+  push:
+    branches: [main]      # adjust branch as needed
 
 jobs:
-  build:
-    runs-on: macos-14
+  build-macos:
+    runs-on: macos-14     # GitHub runner with macOS 14
+
+    # This permission lets the Tauri CLI embed version info and allows artifact upload.
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # 1. Check out your repository
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      # 2. Set up Node.js (LTS) with caching.  Tauri docs recommend actions/setup-node@v4 [oai_citation:2‡v2.tauri.app](https://v2.tauri.app/distribute/pipelines/github/#:~:text=1,and%20create%20a%20GitHub%20release).
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: 'lts/*'
+          cache: 'npm'
 
-      - name: Setup Rust stable toolchain
-        uses: actions-rs/toolchain@v1
+      # 3. Install the Rust toolchain.  We add both Apple Silicon and Intel targets, as recommended [oai_citation:3‡v2.tauri.app](https://v2.tauri.app/distribute/pipelines/github/#:~:text=with%3A).
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          override: true
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Install frontend dependencies
+      # 4. Cache Rust build artifacts to speed up subsequent runs [oai_citation:4‡v2.tauri.app](https://v2.tauri.app/distribute/pipelines/github/#:~:text=).
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # 5. Install JavaScript/TypeScript dependencies.
+      - name: Install dependencies
         run: npm ci
 
+      # 6. Optional: Install the Tauri CLI.  The CLI can also be invoked via npm scripts,
+      # but installing it ensures `tauri` is on the PATH for subsequent commands.
       - name: Install Tauri CLI
-        run: cargo install tauri-cli
+        run: cargo install --locked tauri-cli
 
-      - name: Build VoiceInk with Tauri
-        run: npm run tauri build
-
-      - name: Copy DMG artifact
+      # 7. Build the app twice—once for Intel and once for Apple Silicon—using the same
+      # technique described in the Tauri CI docs [oai_citation:5‡docs.crabnebula.dev](https://docs.crabnebula.dev/cloud/ci/tauri-v2-workflow/#:~:text=if%3A%20matrix.os%20%3D%3D%20%27macos).  You can later add
+      # signing variables (TAURI_SIGNING_PRIVATE_KEY, etc.) here.
+      - name: Build VoiceInk for macOS
         run: |
-          mkdir -p output
-          cp src-tauri/target/release/bundle/dmg/*.dmg output/
+          rustup target add x86_64-apple-darwin
+          npm exec tauri build -- --target x86_64-apple-darwin
+          npm exec tauri build -- --target aarch64-apple-darwin
+        env:
+          # Uncomment and set these secrets when you’re ready to sign/notarize.
+          # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Upload DMG
+      # 8. Upload the generated .dmg files.  Tauri places DMGs under
+      # src-tauri/target/<target-triple>/release/bundle/dmg.  We use a glob pattern to pick up both
+      # architectures.  Upload-artifact v4 is used because v1/v2/v3 are deprecated [oai_citation:6‡raw.githubusercontent.com](https://raw.githubusercontent.com/actions/upload-artifact/v4/README.md#:~:text=%60%40actions%2Fupload).
+      - name: Upload DMG artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceInk-macOS-DMG
-          path: output/*.dmg
+          name: voiceink-macos-dmg
+          path: |
+            src-tauri/target/*-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
