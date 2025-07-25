@@ -79,7 +79,7 @@ jobs:
           ls -l "$DMG_NAME"
 
       - name: Upload dmg artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: voiceink-dmg
           path: VoiceInk.dmg
