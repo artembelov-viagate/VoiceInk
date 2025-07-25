@@ -23,7 +23,7 @@ jobs:
           cd ..
           git clone https://github.com/ggerganov/whisper.cpp
           cd whisper.cpp
-          ./scripts/build-xcframework.sh
+          ./build-xcframework.sh
 
       - name: Resolve Swift Package dependencies
         run: |
