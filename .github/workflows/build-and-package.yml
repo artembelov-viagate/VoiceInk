@@ -1,0 +1,45 @@
+name: Build and Package macOS VoiceInk App
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_15.2.app
+
+      - name: Build VoiceInk with Xcode
+        run: |
+          xcodebuild -project VoiceInk.xcodeproj \
+                     -scheme VoiceInk \
+                     -configuration Release \
+                     -derivedDataPath build
+
+      - name: Copy .app bundle
+        run: |
+          mkdir -p dist
+          cp -R build/Build/Products/Release/VoiceInk.app dist/
+
+      - name: Create DMG (Disk Image)
+        run: |
+          mkdir -p dmg_source
+          cp -R dist/VoiceInk.app dmg_source/
+          ln -s /Applications dmg_source/Applications
+          hdiutil create -volname "VoiceInk" \
+                         -srcfolder dmg_source \
+                         -ov \
+                         -format UDZO \
+                         dist/VoiceInk.dmg
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoiceInk-macOS-DMG
+          path: dist/VoiceInk.dmg
