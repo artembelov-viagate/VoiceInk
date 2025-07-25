@@ -1,36 +1,44 @@
-name: Build and Package VoiceInk (SwiftPM)
+name: Build VoiceInk (Tauri) & Package DMG
 
 on:
-  workflow_dispatch:
   push:
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build with Swift Package Manager
-        run: |
-          swift build --configuration release
-          mkdir -p dist
-          cp -R .build/release/VoiceInk.app dist/
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
-      - name: Create DMG
+      - name: Setup Rust stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli
+
+      - name: Build VoiceInk with Tauri
+        run: npm run tauri build
+
+      - name: Copy DMG artifact
         run: |
-          mkdir -p dmg_source
-          cp -R dist/VoiceInk.app dmg_source/
-          ln -s /Applications dmg_source/Applications
-          hdiutil create -volname "VoiceInk" \
-                         -srcfolder dmg_source \
-                         -ov \
-                         -format UDZO \
-                         dist/VoiceInk.dmg
+          mkdir -p output
+          cp src-tauri/target/release/bundle/dmg/*.dmg output/
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: VoiceInk-macOS-DMG
-          path: dist/VoiceInk.dmg
+          path: output/*.dmg
