@@ -1,0 +1,85 @@
+# GitHub Actions workflow to build and package the VoiceInk macOS app
+#
+# This workflow assumes that you have forked the VoiceInk repository and want to
+# build the native macOS app via Xcode. It uses macOS 14 runners and clones
+# the whisper.cpp repository at a directory above the VoiceInk project so that
+# the relative reference `../whisper.cpp/build-apple/whisper.xcframework` inside
+# the Xcode project resolves correctly.
+#
+# The resulting .dmg file is uploaded as an artifact.  No signing or notarization
+# is performed here; if you want to distribute the app outside of the CI
+# environment you must provide your own Apple Developer ID certificate and
+# configure code signing accordingly (see the notes in the README below).
+
+name: build-voiceink
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+    env:
+      # These environment variables turn off code‑signing to avoid failures when
+      # no signing certificates are present on GitHub-hosted runners.  When
+      # distributing a final product you should remove these and instead
+      # configure signing with your Apple Developer certificate.
+      CODE_SIGNING_REQUIRED: "NO"
+      CODE_SIGNING_ALLOWED: "NO"
+      CODE_SIGN_IDENTITY: ""
+    steps:
+      - name: Checkout VoiceInk
+        uses: actions/checkout@v4
+
+      - name: Fetch whisper.cpp and build XCFramework
+        run: |
+          # Clone whisper.cpp one directory above the VoiceInk repository
+          git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git ../whisper.cpp
+          cd ../whisper.cpp
+          # Build the xcframework; this script uses cmake and Xcode under the hood
+          ./build-xcframework.sh
+        # The script will create build-apple/whisper.xcframework which is
+        # referenced from the VoiceInk project via a relative path.
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          # Preresolve Swift Package Manager dependencies to reduce build flakiness
+          xcodebuild -resolvePackageDependencies -project VoiceInk.xcodeproj
+
+      - name: Build VoiceInk (Release configuration)
+        run: |
+          # Build the application in Release configuration.  The derivedDataPath
+          # is set to a local directory so we know where to find the .app when
+          # packaging.  We disable signing via env variables defined above.
+          xcodebuild \
+            -project VoiceInk.xcodeproj \
+            -scheme VoiceInk \
+            -configuration Release \
+            -derivedDataPath build \
+            -destination "generic/platform=macOS" \
+            build
+
+      - name: Create dmg from built app
+        run: |
+          # Determine the path of the built .app inside the derived data folder.
+          APP_PATH=$(find "build" -name "VoiceInk.app" -type d -print -quit)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ Unable to locate VoiceInk.app; check build output"
+            exit 1
+          fi
+          DMG_NAME="VoiceInk.dmg"
+          echo "📦 Packaging $APP_PATH into $DMG_NAME"
+          # Create a compressed DMG from the .app.  The -fs HFS+ preserves
+          # extended attributes such as executable flags.  Adjust the volume
+          # name as desired.
+          hdiutil create -volname "VoiceInk" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_NAME"
+          ls -l "$DMG_NAME"
+
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: voiceink-dmg
+          path: VoiceInk.dmg
