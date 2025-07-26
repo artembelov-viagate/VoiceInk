@@ -110,7 +110,7 @@ jobs:
               CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
               clean build
           else
-            echo "Building without code signing"
+            echo "Building without code signing (unsigned build for testing)"
             xcodebuild \
               -project VoiceInk.xcodeproj \
               -scheme VoiceInk \
@@ -139,12 +139,23 @@ jobs:
               echo "✅ Code signature verified"
             else
               echo "ℹ️ Build was not signed - skipping signature verification"
+              echo "App will show security warnings when downloaded"
             fi
           else
             echo "❌ App not found at expected location"
             find ./DerivedData -name "VoiceInk.app" -type d || echo "No VoiceInk.app found"
             exit 1
           fi
+
+      - name: Apply ad-hoc signature for unsigned builds
+        if: steps.check_signing.outputs.should_sign == 'false'
+        run: |
+          echo "Applying ad-hoc signature for better compatibility..."
+          codesign --force --deep --sign - "$APP_PATH"
+          echo "✅ Ad-hoc signature applied"
+          
+          # Verify the ad-hoc signature
+          codesign -dv --verbose=4 "$APP_PATH"
 
       - name: Notarize app
         if: steps.check_signing.outputs.should_sign == 'true'
@@ -194,7 +205,7 @@ jobs:
             codesign -dv --verbose=4 VoiceInk.dmg
             codesign --verify --deep --strict VoiceInk.dmg
           else
-            echo "ℹ️ DMG was not signed - users will see security warnings"
+            echo "ℹ️ DMG was not signed - this is expected for unsigned builds"
           fi
           
           # Verify DMG was created
@@ -206,11 +217,48 @@ jobs:
             exit 1
           fi
 
+      - name: Create installation instructions
+        if: steps.check_signing.outputs.should_sign == 'false'
+        run: |
+          cat > INSTALLATION_INSTRUCTIONS.txt << 'EOF'
+          # VoiceInk Installation Instructions (Unsigned Build)
+          
+          This is an unsigned development build. macOS will show security warnings.
+          
+          ## Installation Steps:
+          
+          1. Download and mount the VoiceInk.dmg file
+          2. Drag VoiceInk.app to your Applications folder
+          3. Right-click on VoiceInk.app in Applications
+          4. Select "Open" from the context menu
+          5. Click "Open" in the security dialog
+          
+          ## Alternative Method:
+          
+          If you're comfortable with Terminal:
+          1. Download VoiceInk.dmg
+          2. Mount the DMG and copy the app
+          3. Run: xattr -d com.apple.quarantine /Applications/VoiceInk.app
+          4. Launch the app normally
+          
+          ## Why These Steps Are Needed:
+          
+          This build is not signed with an Apple Developer certificate, so macOS
+          Gatekeeper blocks it by default. The steps above override this protection.
+          
+          For production releases, we will provide signed builds that install
+          without these security warnings.
+          EOF
+          
+          echo "✅ Installation instructions created"
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
           name: VoiceInk-macOS-${{ github.sha }}
-          path: VoiceInk.dmg
+          path: |
+            VoiceInk.dmg
+            INSTALLATION_INSTRUCTIONS.txt
 
       - name: Clean up keychain
         if: always() && steps.check_signing.outputs.should_sign == 'true'
