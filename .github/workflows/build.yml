@@ -1,4 +1,4 @@
-name: Build VoiceInk with Xcode 16.4 (macOS 15)
+name: Build VoiceInk
 
 on:
   push:
@@ -12,23 +12,38 @@ jobs:
     runs-on: macos-15
 
     steps:
+      - name: Checkout VoiceInk
+        uses: actions/checkout@v4
+
       - name: Select Xcode 16.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '16.4'
 
       - name: Confirm active Xcode version
-        run: xcodebuild -version
-
-      - name: Checkout VoiceInk
-        uses: actions/checkout@v4
-
-      - name: Fetch whisper.cpp and build XCFramework
         run: |
+          xcodebuild -version
+          xcrun --show-sdk-path
+
+      - name: Clone and build whisper.cpp XCFramework
+        run: |
+          # Clone whisper.cpp in the parent directory (as expected by the Xcode project)
           cd ..
-          git clone https://github.com/ggerganov/whisper.cpp
+          git clone https://github.com/ggerganov/whisper.cpp.git
           cd whisper.cpp
+          
+          # Make the build script executable and run it
+          chmod +x ./build-xcframework.sh
           ./build-xcframework.sh
+          
+          # Verify the framework was built
+          ls -la build-apple/
+          if [ ! -d "build-apple/whisper.xcframework" ]; then
+            echo "❌ Failed to build whisper.xcframework"
+            exit 1
+          else
+            echo "✅ whisper.xcframework built successfully"
+          fi
 
       - name: Resolve Swift Package dependencies
         run: |
@@ -43,24 +58,59 @@ jobs:
             -project VoiceInk.xcodeproj \
             -scheme VoiceInk \
             -configuration Release \
+            -derivedDataPath ./DerivedData \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
             clean build
+
+      - name: Locate and verify built app
+        run: |
+          APP_PATH="./DerivedData/Build/Products/Release/VoiceInk.app"
+          if [ -d "$APP_PATH" ]; then
+            echo "✅ App built successfully at: $APP_PATH"
+            ls -la "$APP_PATH"
+            echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          else
+            echo "❌ App not found at expected location"
+            find ./DerivedData -name "VoiceInk.app" -type d || echo "No VoiceInk.app found"
+            exit 1
+          fi
 
       - name: Package into DMG
         run: |
-          mkdir -p dmg-out
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "VoiceInk.app" -type d | head -n 1)
-          cp -R "$APP_PATH" dmg-out/
-          hdiutil create -volname VoiceInk \
-                         -srcfolder dmg-out \
+          mkdir -p dmg-staging
+          cp -R "$APP_PATH" dmg-staging/
+          
+          # Create DMG
+          hdiutil create -volname "VoiceInk" \
+                         -srcfolder dmg-staging \
                          -ov \
                          -format UDZO \
                          VoiceInk.dmg
+          
+          # Verify DMG was created
+          if [ -f "VoiceInk.dmg" ]; then
+            echo "✅ DMG created successfully"
+            ls -lh VoiceInk.dmg
+          else
+            echo "❌ Failed to create DMG"
+            exit 1
+          fi
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VoiceInk-macOS
+          name: VoiceInk-macOS-${{ github.sha }}
           path: VoiceInk.dmg
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            ./DerivedData/Logs/
+            xcodebuild.log
+          if-no-files-found: ignore
