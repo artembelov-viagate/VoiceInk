@@ -25,6 +25,32 @@ jobs:
           xcodebuild -version
           xcrun --show-sdk-path
 
+      - name: Setup code signing
+        if: github.event_name != 'pull_request'
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          # Create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/apple_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          
+          # Import certificate from secrets
+          echo -n "$APPLE_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          
+          # Create temporary keychain
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+          # Import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          
+          # List available code signing identities
+          security find-identity -v -p codesigning $KEYCHAIN_PATH
+
       - name: Clone and build whisper.cpp XCFramework
         run: |
           # Clone whisper.cpp in the parent directory (as expected by the Xcode project)
@@ -53,17 +79,35 @@ jobs:
             -disableAutomaticPackageResolution
 
       - name: Build VoiceInk app
+        env:
+          DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
         run: |
-          xcodebuild \
-            -project VoiceInk.xcodeproj \
-            -scheme VoiceInk \
-            -configuration Release \
-            -derivedDataPath ./DerivedData \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            clean build
+          # For pull requests, build without signing
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Building for pull request - code signing disabled"
+            xcodebuild \
+              -project VoiceInk.xcodeproj \
+              -scheme VoiceInk \
+              -configuration Release \
+              -derivedDataPath ./DerivedData \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGN_IDENTITY="" \
+              PROVISIONING_PROFILE_SPECIFIER="" \
+              clean build
+          else
+            echo "Building for release - code signing enabled"
+            xcodebuild \
+              -project VoiceInk.xcodeproj \
+              -scheme VoiceInk \
+              -configuration Release \
+              -derivedDataPath ./DerivedData \
+              OTHER_CODE_SIGN_FLAGS="--options=runtime" \
+              DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+              CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+              clean build
+          fi
 
       - name: Locate and verify built app
         run: |
@@ -72,11 +116,43 @@ jobs:
             echo "✅ App built successfully at: $APP_PATH"
             ls -la "$APP_PATH"
             echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+            
+            # Verify code signature (only for non-PR builds)
+            if [ "${{ github.event_name }}" != "pull_request" ]; then
+              echo "Verifying code signature..."
+              codesign -dv --verbose=4 "$APP_PATH"
+              codesign --verify --deep --strict "$APP_PATH"
+              echo "✅ Code signature verified"
+            fi
           else
             echo "❌ App not found at expected location"
             find ./DerivedData -name "VoiceInk.app" -type d || echo "No VoiceInk.app found"
             exit 1
           fi
+
+      - name: Notarize app
+        if: github.event_name != 'pull_request'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "Creating archive for notarization..."
+          ditto -c -k --keepParent "$APP_PATH" "VoiceInk.zip"
+          
+          echo "Submitting for notarization..."
+          xcrun notarytool submit "VoiceInk.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          
+          echo "Stapling notarization to app..."
+          xcrun stapler staple "$APP_PATH"
+          
+          echo "Verifying notarization..."
+          xcrun stapler validate "$APP_PATH"
+          echo "✅ Notarization completed successfully"
 
       - name: Package into DMG
         run: |
@@ -89,6 +165,19 @@ jobs:
                          -ov \
                          -format UDZO \
                          VoiceInk.dmg
+          
+          # Sign DMG (only for non-PR builds)
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Signing DMG..."
+            codesign --sign "${{ secrets.CODE_SIGN_IDENTITY }}" \
+                     --options=runtime \
+                     --verbose \
+                     VoiceInk.dmg
+            
+            echo "Verifying DMG signature..."
+            codesign -dv --verbose=4 VoiceInk.dmg
+            codesign --verify --deep --strict VoiceInk.dmg
+          fi
           
           # Verify DMG was created
           if [ -f "VoiceInk.dmg" ]; then
@@ -104,6 +193,11 @@ jobs:
         with:
           name: VoiceInk-macOS-${{ github.sha }}
           path: VoiceInk.dmg
+
+      - name: Clean up keychain
+        if: always() && github.event_name != 'pull_request'
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
 
       - name: Upload build logs (on failure)
         if: failure()
