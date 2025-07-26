@@ -62,84 +62,90 @@ class NativeAppleTranscriptionService: TranscriptionService {
             throw ServiceError.unsupportedOS
         }
         
-        logger.notice("Starting Apple native transcription with SpeechAnalyzer.")
-        
-        let audioFile = try AVAudioFile(forReading: audioURL)
-        
-        // Get the user's selected language in simple format and convert to BCP-47 format
-        let selectedLanguage = UserDefaults.standard.string(forKey: "SelectedLanguage") ?? "en"
-        let appleLocale = mapToAppleLocale(selectedLanguage)
-        let locale = Locale(identifier: appleLocale)
+        // This entire function should only compile on macOS 26+
+        if #available(macOS 26, *) {
+            logger.notice("Starting Apple native transcription with SpeechAnalyzer.")
+            
+            let audioFile = try AVAudioFile(forReading: audioURL)
+            
+            // Get the user's selected language in simple format and convert to BCP-47 format
+            let selectedLanguage = UserDefaults.standard.string(forKey: "SelectedLanguage") ?? "en"
+            let appleLocale = mapToAppleLocale(selectedLanguage)
+            let locale = Locale(identifier: appleLocale)
 
-        // Check for locale support and asset installation status using proper BCP-47 format
-        let supportedLocales = await SpeechTranscriber.supportedLocales
-        let installedLocales = await SpeechTranscriber.installedLocales
-        let isLocaleSupported = supportedLocales.map({ $0.identifier(.bcp47) }).contains(locale.identifier(.bcp47))
-        let isLocaleInstalled = installedLocales.map({ $0.identifier(.bcp47) }).contains(locale.identifier(.bcp47))
+            // Check for locale support and asset installation status using proper BCP-47 format
+            let supportedLocales = await SpeechTranscriber.supportedLocales
+            let installedLocales = await SpeechTranscriber.installedLocales
+            let isLocaleSupported = supportedLocales.map({ $0.identifier(.bcp47) }).contains(locale.identifier(.bcp47))
+            let isLocaleInstalled = installedLocales.map({ $0.identifier(.bcp47) }).contains(locale.identifier(.bcp47))
 
-        // Create the detailed log message
-        let supportedIdentifiers = supportedLocales.map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
-        let installedIdentifiers = installedLocales.map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
-        let availableForDownload = Set(supportedLocales).subtracting(Set(installedLocales)).map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
-        
-        var statusMessage: String
-        if isLocaleInstalled {
-            statusMessage = "✅ Installed"
-        } else if isLocaleSupported {
-            statusMessage = "❌ Not Installed (Available for download)"
+            // Create the detailed log message
+            let supportedIdentifiers = supportedLocales.map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
+            let installedIdentifiers = installedLocales.map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
+            let availableForDownload = Set(supportedLocales).subtracting(Set(installedLocales)).map { $0.identifier(.bcp47) }.sorted().joined(separator: ", ")
+            
+            var statusMessage: String
+            if isLocaleInstalled {
+                statusMessage = "✅ Installed"
+            } else if isLocaleSupported {
+                statusMessage = "❌ Not Installed (Available for download)"
+            } else {
+                statusMessage = "❌ Not Supported"
+            }
+            
+            let logMessage = """
+            
+            --- Native Speech Transcription ---
+            Selected Language: '\(selectedLanguage)' → Apple Locale: '\(locale.identifier(.bcp47))'
+            Status: \(statusMessage)
+            ------------------------------------
+            Supported Locales: [\(supportedIdentifiers)]
+            Installed Locales: [\(installedIdentifiers)]
+            Available for Download: [\(availableForDownload)]
+            ------------------------------------
+            """
+            logger.notice("\(logMessage)")
+
+            guard isLocaleSupported else {
+                logger.error("Transcription failed: Locale '\(locale.identifier(.bcp47))' is not supported by SpeechTranscriber.")
+                throw ServiceError.localeNotSupported
+            }
+            
+            // Properly manage asset allocation/deallocation
+            try await deallocateExistingAssets()
+            try await allocateAssetsForLocale(locale)
+            
+            let transcriber = SpeechTranscriber(
+                locale: locale,
+                transcriptionOptions: [],
+                reportingOptions: [],
+                attributeOptions: []
+            )
+            
+            // Ensure model assets are available, triggering a system download prompt if necessary.
+            try await ensureModelIsAvailable(for: transcriber, locale: locale)
+            
+            let analyzer = SpeechAnalyzer(modules: [transcriber])
+            
+            try await analyzer.start(inputAudioFile: audioFile, finishAfterFile: true)
+            
+            var transcript: AttributedString = ""
+            for try await result in transcriber.results {
+                transcript += result.text
+            }
+            
+            var finalTranscription = String(transcript.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if UserDefaults.standard.object(forKey: "IsTextFormattingEnabled") as? Bool ?? true {
+                finalTranscription = WhisperTextFormatter.format(finalTranscription)
+            }
+            
+            logger.notice("Native transcription successful. Length: \(finalTranscription.count) characters.")
+            return finalTranscription
         } else {
-            statusMessage = "❌ Not Supported"
+            // This should never be reached due to the guard above, but required for compilation
+            throw ServiceError.unsupportedOS
         }
-        
-        let logMessage = """
-        
-        --- Native Speech Transcription ---
-        Selected Language: '\(selectedLanguage)' → Apple Locale: '\(locale.identifier(.bcp47))'
-        Status: \(statusMessage)
-        ------------------------------------
-        Supported Locales: [\(supportedIdentifiers)]
-        Installed Locales: [\(installedIdentifiers)]
-        Available for Download: [\(availableForDownload)]
-        ------------------------------------
-        """
-        logger.notice("\(logMessage)")
-
-        guard isLocaleSupported else {
-            logger.error("Transcription failed: Locale '\(locale.identifier(.bcp47))' is not supported by SpeechTranscriber.")
-            throw ServiceError.localeNotSupported
-        }
-        
-        // Properly manage asset allocation/deallocation
-        try await deallocateExistingAssets()
-        try await allocateAssetsForLocale(locale)
-        
-        let transcriber = SpeechTranscriber(
-            locale: locale,
-            transcriptionOptions: [],
-            reportingOptions: [],
-            attributeOptions: []
-        )
-        
-        // Ensure model assets are available, triggering a system download prompt if necessary.
-        try await ensureModelIsAvailable(for: transcriber, locale: locale)
-        
-        let analyzer = SpeechAnalyzer(modules: [transcriber])
-        
-        try await analyzer.start(inputAudioFile: audioFile, finishAfterFile: true)
-        
-        var transcript: AttributedString = ""
-        for try await result in transcriber.results {
-            transcript += result.text
-        }
-        
-        var finalTranscription = String(transcript.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        if UserDefaults.standard.object(forKey: "IsTextFormattingEnabled") as? Bool ?? true {
-            finalTranscription = WhisperTextFormatter.format(finalTranscription)
-        }
-        
-        logger.notice("Native transcription successful. Length: \(finalTranscription.count) characters.")
-        return finalTranscription
     }
     
     @available(macOS 26, *)
