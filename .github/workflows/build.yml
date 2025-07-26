@@ -25,8 +25,22 @@ jobs:
           xcodebuild -version
           xcrun --show-sdk-path
 
+      - name: Check code signing availability
+        id: check_signing
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Skipping code signing for pull request"
+            echo "should_sign=false" >> $GITHUB_OUTPUT
+          elif [ -z "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ] || [ -z "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ]; then
+            echo "Code signing secrets not available - building without signing"
+            echo "should_sign=false" >> $GITHUB_OUTPUT
+          else
+            echo "Code signing secrets available - will sign the build"
+            echo "should_sign=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Setup code signing
-        if: github.event_name != 'pull_request'
+        if: steps.check_signing.outputs.should_sign == 'true'
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -83,9 +97,20 @@ jobs:
           DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
           CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
         run: |
-          # For pull requests, build without signing
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "Building for pull request - code signing disabled"
+          # Build with or without signing based on availability
+          if [ "${{ steps.check_signing.outputs.should_sign }}" = "true" ]; then
+            echo "Building with code signing enabled"
+            xcodebuild \
+              -project VoiceInk.xcodeproj \
+              -scheme VoiceInk \
+              -configuration Release \
+              -derivedDataPath ./DerivedData \
+              OTHER_CODE_SIGN_FLAGS="--options=runtime" \
+              DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+              CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+              clean build
+          else
+            echo "Building without code signing"
             xcodebuild \
               -project VoiceInk.xcodeproj \
               -scheme VoiceInk \
@@ -95,17 +120,6 @@ jobs:
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGN_IDENTITY="" \
               PROVISIONING_PROFILE_SPECIFIER="" \
-              clean build
-          else
-            echo "Building for release - code signing enabled"
-            xcodebuild \
-              -project VoiceInk.xcodeproj \
-              -scheme VoiceInk \
-              -configuration Release \
-              -derivedDataPath ./DerivedData \
-              OTHER_CODE_SIGN_FLAGS="--options=runtime" \
-              DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-              CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
               clean build
           fi
 
@@ -117,12 +131,14 @@ jobs:
             ls -la "$APP_PATH"
             echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
             
-            # Verify code signature (only for non-PR builds)
-            if [ "${{ github.event_name }}" != "pull_request" ]; then
+            # Verify code signature (only for signed builds)
+            if [ "${{ steps.check_signing.outputs.should_sign }}" = "true" ]; then
               echo "Verifying code signature..."
               codesign -dv --verbose=4 "$APP_PATH"
               codesign --verify --deep --strict "$APP_PATH"
               echo "✅ Code signature verified"
+            else
+              echo "ℹ️ Build was not signed - skipping signature verification"
             fi
           else
             echo "❌ App not found at expected location"
@@ -131,7 +147,7 @@ jobs:
           fi
 
       - name: Notarize app
-        if: github.event_name != 'pull_request'
+        if: steps.check_signing.outputs.should_sign == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -166,8 +182,8 @@ jobs:
                          -format UDZO \
                          VoiceInk.dmg
           
-          # Sign DMG (only for non-PR builds)
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          # Sign DMG (only for signed builds)
+          if [ "${{ steps.check_signing.outputs.should_sign }}" = "true" ]; then
             echo "Signing DMG..."
             codesign --sign "${{ secrets.CODE_SIGN_IDENTITY }}" \
                      --options=runtime \
@@ -177,6 +193,8 @@ jobs:
             echo "Verifying DMG signature..."
             codesign -dv --verbose=4 VoiceInk.dmg
             codesign --verify --deep --strict VoiceInk.dmg
+          else
+            echo "ℹ️ DMG was not signed - users will see security warnings"
           fi
           
           # Verify DMG was created
@@ -195,7 +213,7 @@ jobs:
           path: VoiceInk.dmg
 
       - name: Clean up keychain
-        if: always() && github.event_name != 'pull_request'
+        if: always() && steps.check_signing.outputs.should_sign == 'true'
         run: |
           security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true
 
