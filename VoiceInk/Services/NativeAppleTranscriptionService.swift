@@ -57,6 +57,13 @@ class NativeAppleTranscriptionService: TranscriptionService {
             throw ServiceError.invalidModel
         }
         
+        // SpeechTranscriber, SpeechAnalyzer, and AssetInventory APIs are not yet available in current macOS
+        // This service is designed for macOS 26+ (Tahoe) which is not yet released
+        logger.error("Native Apple Transcription Service requires macOS 26+ (not yet available)")
+        throw ServiceError.unsupportedOS
+        
+        // TODO: Uncomment when macOS 26+ becomes available
+        /*
         guard #available(macOS 26, *) else {
             logger.error("SpeechAnalyzer is not available on this macOS version")
             throw ServiceError.unsupportedOS
@@ -146,8 +153,11 @@ class NativeAppleTranscriptionService: TranscriptionService {
             // This should never be reached due to the guard above, but required for compilation
             throw ServiceError.unsupportedOS
         }
+        */
     }
     
+    /*
+    // TODO: Uncomment when macOS 26+ becomes available
     @available(macOS 26, *)
     private func deallocateExistingAssets() async throws {
         #if canImport(Speech)
@@ -191,4 +201,5 @@ class NativeAppleTranscriptionService: TranscriptionService {
         }
         #endif
     }
+    */
 } 
